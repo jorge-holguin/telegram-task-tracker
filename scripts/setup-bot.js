@@ -1,12 +1,20 @@
 // Script para configurar el webhook de Telegram
 const readline = require('readline');
+require('dotenv').config();
 
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
 });
 
-const BOT_TOKEN = '8058907728:AAF-Bd2C91GMTZYVo5QzWIvOv5oTVsdslsM';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+if (!BOT_TOKEN) {
+  console.error('❌ Error: TELEGRAM_BOT_TOKEN no encontrado en .env');
+  console.log('Asegúrate de tener la variable en tu archivo .env.local');
+  rl.close();
+  return;
+}
 
 console.log('\n🤖 Configuración del Bot de Telegram\n');
 
