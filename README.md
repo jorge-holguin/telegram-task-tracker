@@ -1,36 +1,136 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# VidProof - Plataforma de Gestión de Cumplimiento
 
-## Getting Started
+Plataforma SaaS privada para gestionar el cumplimiento de trabajadores mediante videos. Incluye un Dashboard administrativo y un Bot de Telegram como interfaz para usuarios.
 
-First, run the development server:
+## Stack Tecnológico
+
+- **Frontend**: Next.js 15 (App Router), Tailwind CSS, Shadcn/UI
+- **Backend**: Supabase (Auth, PostgreSQL, Storage) - **Usando nuevas Publishable/Secret Keys**
+- **Bot**: Telegram Bot API (Webhooks)
+- **Estado**: TanStack Query (React Query)
+
+## Configuración Inicial
+
+### 1. Configurar Supabase
+
+1. Crea un proyecto en [Supabase](https://supabase.com)
+2. Ve al **SQL Editor** y ejecuta el contenido de `schema.sql`
+3. Crea un bucket de Storage llamado `evidencias` (público)
+4. Ve a **Settings > API Keys** y habilita las nuevas Publishable/Secret keys
+5. Copia las credenciales del proyecto
+
+### 2. Configurar Variables de Entorno
+
+Copia `.env.example` a `.env.local` y completa:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://tu-proyecto.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_tu_publishable_key
+SUPABASE_SECRET_KEY=sb_secret_tu_secret_key
+TELEGRAM_BOT_TOKEN=tu_bot_token
+NEXT_PUBLIC_APP_URL=https://tu-dominio.com
+CRON_SECRET=un_secret_aleatorio
+```
+
+### 3. Crear Bot de Telegram
+
+1. Habla con [@BotFather](https://t.me/BotFather) en Telegram
+2. Usa `/newbot` y sigue las instrucciones
+3. Copia el token y agrégalo a `.env.local`
+
+### 4. Instalar Dependencias
+
+```bash
+npm install
+```
+
+### 5. Ejecutar en Desarrollo
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Abre [http://localhost:3000](http://localhost:3000)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Configurar Webhook de Telegram
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Después de desplegar, configura el webhook:
 
-## Learn More
+```bash
+curl -X POST https://tu-dominio.com/api/telegram/setup
+```
 
-To learn more about Next.js, take a look at the following resources:
+O visita `GET /api/telegram/setup` para ver el estado actual.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Estructura del Proyecto
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```
+vidproof/
+├── app/
+│   ├── actions/          # Server Actions
+│   ├── api/
+│   │   ├── cron/         # Cron jobs
+│   │   └── telegram/     # Webhook del bot
+│   └── dashboard/        # Panel de control
+├── components/
+│   ├── dashboard/        # Componentes del dashboard
+│   ├── providers/        # Context providers
+│   └── ui/               # Componentes UI reutilizables
+├── lib/
+│   └── supabase/         # Cliente Supabase
+├── types/                # Tipos TypeScript
+└── schema.sql            # Schema de la base de datos
+```
 
-## Deploy on Vercel
+## Funcionalidades
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Dashboard
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Estadísticas**: % cumplimiento, usuarios activos, videos pendientes
+- **Gestión de Videos**: Crear videos con notificación automática
+- **Monitor de Seguimiento**: Tabla con filtros, vista de evidencias, rechazo
+
+### Bot de Telegram
+
+- `/start`: Registro de nuevos usuarios
+- **Envío de fotos**: Registro automático de evidencias
+- **Notificaciones**: Alertas de nuevos videos y rechazos
+
+### Automatización
+
+- **Cron cada 4 horas**: Recordatorios automáticos de tareas pendientes
+
+## Despliegue
+
+### Vercel (Recomendado)
+
+1. Conecta el repositorio a Vercel
+2. Configura las variables de entorno
+3. Despliega
+
+El archivo `vercel.json` configura automáticamente el cron job.
+
+### Configurar Webhook Post-Deploy
+
+Después de desplegar, ejecuta:
+
+```bash
+curl -X POST https://tu-app.vercel.app/api/telegram/setup
+```
+
+## Comandos
+
+```bash
+npm run dev      # Desarrollo
+npm run build    # Build de producción
+npm run start    # Servidor de producción
+npm run lint     # Linter
+```
+
+## Modelo de Datos
+
+- **perfiles**: Usuarios registrados via Telegram
+- **videos**: Videos que deben ver los usuarios
+- **tareas**: Relación usuario-video con estado de cumplimiento
+
+Ver `schema.sql` para detalles completos.
