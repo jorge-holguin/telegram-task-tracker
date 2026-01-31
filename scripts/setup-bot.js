@@ -16,8 +16,6 @@ if (!BOT_TOKEN) {
   return;
 }
 
-console.log('\n🤖 Configuración del Bot de Telegram\n');
-
 rl.question('Ingresa la URL de ngrok (https://xxx.ngrok.io): ', async (ngrokUrl) => {
   if (!ngrokUrl.startsWith('https://')) {
     console.error('❌ Error: La URL debe comenzar con https://');
