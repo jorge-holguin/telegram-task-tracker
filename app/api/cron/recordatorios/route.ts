@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { enviarRecordatorios } from "@/app/actions/telegram"
 
-export async function GET(request: NextRequest) {
+async function handleCron(request: NextRequest) {
   const authHeader = request.headers.get("authorization")
   
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -18,6 +18,14 @@ export async function GET(request: NextRequest) {
       { status: 500 }
     )
   }
+}
+
+export async function GET(request: NextRequest) {
+  return handleCron(request)
+}
+
+export async function POST(request: NextRequest) {
+  return handleCron(request)
 }
 
 export const dynamic = "force-dynamic"

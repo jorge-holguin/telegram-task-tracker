@@ -4,6 +4,8 @@ import sharp from "sharp"
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ""
 
+type Rango = 'usuario' | 'administrador'
+
 interface TelegramUpdate {
   update_id: number
   message?: {
@@ -36,15 +38,30 @@ interface TelegramUpdate {
       file_size?: number
     }
   }
+  callback_query?: {
+    id: string
+    from: {
+      id: number
+      first_name: string
+    }
+    message?: {
+      message_id: number
+      chat: {
+        id: number
+      }
+    }
+    data?: string
+  }
 }
 
-// Estado temporal para el flujo de /video (en memoria, se pierde al reiniciar)
-// Para producción, usar Redis o una tabla en Supabase
-const videoUploadSessions: Map<number, { 
-  step: 'waiting_video' | 'waiting_title'
+interface UserSession {
+  step: 'waiting_video' | 'waiting_title' | 'waiting_evidence' | 'waiting_broadcast' | 'waiting_new_name'
   videoFileId?: string
-  videoUrl?: string
-}> = new Map()
+  selectedTaskId?: string
+}
+
+// Estado temporal para flujos (en memoria, se pierde al reiniciar)
+const userSessions: Map<number, UserSession> = new Map()
 
 async function sendMessage(chatId: number, text: string, parseMode?: string) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -413,7 +430,7 @@ async function handlePhoto(
 
 async function handleVideoCommand(telegramId: number, chatId: number) {
   // Iniciar sesión de subida de video
-  videoUploadSessions.set(telegramId, { step: 'waiting_video' })
+  userSessions.set(telegramId, { step: 'waiting_video' })
   
   await sendMessage(
     chatId,
@@ -422,7 +439,7 @@ async function handleVideoCommand(telegramId: number, chatId: number) {
 }
 
 async function handleVideoReceived(telegramId: number, chatId: number, video: TelegramUpdate["message"]) {
-  const session = videoUploadSessions.get(telegramId)
+  const session = userSessions.get(telegramId)
   
   if (!session || session.step !== 'waiting_video') {
     await sendMessage(
@@ -439,7 +456,7 @@ async function handleVideoReceived(telegramId: number, chatId: number, video: Te
   }
   
   // Guardar el file_id del video
-  videoUploadSessions.set(telegramId, {
+  userSessions.set(telegramId, {
     step: 'waiting_title',
     videoFileId: videoData.file_id,
   })
@@ -451,7 +468,7 @@ async function handleVideoReceived(telegramId: number, chatId: number, video: Te
 }
 
 async function handleVideoTitle(telegramId: number, chatId: number, titulo: string) {
-  const session = videoUploadSessions.get(telegramId)
+  const session = userSessions.get(telegramId)
   
   if (!session || session.step !== 'waiting_title' || !session.videoFileId) {
     return false // No está en flujo de video
@@ -478,7 +495,7 @@ async function handleVideoTitle(telegramId: number, chatId: number, titulo: stri
   
   if (videoError) {
     await sendMessage(chatId, `❌ Error al guardar el video: ${videoError.message}`)
-    videoUploadSessions.delete(telegramId)
+    userSessions.delete(telegramId)
     return true
   }
   
@@ -490,7 +507,7 @@ async function handleVideoTitle(telegramId: number, chatId: number, titulo: stri
   
   if (!perfiles || perfiles.length === 0) {
     await sendMessage(chatId, `⚠️ Video guardado pero no hay usuarios registrados para notificar.`)
-    videoUploadSessions.delete(telegramId)
+    userSessions.delete(telegramId)
     return true
   }
   
@@ -537,7 +554,7 @@ async function handleVideoTitle(telegramId: number, chatId: number, titulo: stri
   }
   
   // Limpiar sesión
-  videoUploadSessions.delete(telegramId)
+  userSessions.delete(telegramId)
   
   await sendMessage(
     chatId,
@@ -547,54 +564,778 @@ async function handleVideoTitle(telegramId: number, chatId: number, titulo: stri
   return true
 }
 
+// =============================================
+// Función para verificar si es administrador
+// =============================================
+async function isAdmin(telegramId: number): Promise<boolean> {
+  const supabase = createServerClient()
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("rango")
+    .eq("telegram_id", telegramId)
+    .single()
+  
+  return perfil?.rango === 'administrador'
+}
+
+// =============================================
+// Comando /help - Lista todos los comandos
+// =============================================
+async function handleHelp(telegramId: number, chatId: number) {
+  const admin = await isAdmin(telegramId)
+  
+  let mensaje = `📋 *Comandos Disponibles*\n\n`
+  mensaje += `*Generales:*\n`
+  mensaje += `/start - Registrarte o reiniciar\n`
+  mensaje += `/help - Ver esta ayuda\n`
+  mensaje += `/cancelar - Cancelar operación actual\n\n`
+  
+  mensaje += `*Evidencias:*\n`
+  mensaje += `/evidencia - Subir evidencia (selector de video)\n`
+  mensaje += `/mievidencia - Ver tus tareas\n`
+  mensaje += `/pendientes - Ver solo tareas pendientes\n\n`
+  
+  mensaje += `*Información:*\n`
+  mensaje += `/videos - Ver videos activos\n`
+  mensaje += `/stats - Tu progreso personal\n`
+  mensaje += `/perfil - Ver/editar tu perfil\n`
+  mensaje += `/ranking - Top de usuarios\n`
+  mensaje += `/recordatorio - Solicitar recordatorio\n`
+  
+  if (admin) {
+    mensaje += `\n*👑 Comandos de Admin:*\n`
+    mensaje += `/video - Subir nuevo video\n`
+    mensaje += `/reporte - Reporte de pendientes\n`
+    mensaje += `/broadcast - Mensaje masivo\n`
+    mensaje += `/usuarios - Lista de usuarios\n`
+    mensaje += `/desactivar - Desactivar usuario\n`
+  }
+  
+  await sendMessage(chatId, mensaje)
+}
+
+// =============================================
+// Comando /pendientes - Muestra solo tareas pendientes
+// =============================================
+async function handlePendientes(telegramId: number, chatId: number) {
+  const supabase = createServerClient()
+  
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("id, nombre_completo")
+    .eq("telegram_id", telegramId)
+    .single()
+  
+  if (!perfil) {
+    await sendMessage(chatId, "No estás registrado. Envía /start para registrarte.")
+    return
+  }
+  
+  const { data: tareas } = await supabase
+    .from("tareas")
+    .select("id, videos(titulo)")
+    .eq("perfil_id", perfil.id)
+    .eq("estado", "PENDIENTE")
+    .order("created_at", { ascending: true })
+  
+  if (!tareas || tareas.length === 0) {
+    await sendMessage(chatId, "🎉 ¡No tienes tareas pendientes! Has completado todo.")
+    return
+  }
+  
+  let mensaje = `⏳ *Tienes ${tareas.length} tarea(s) pendiente(s):*\n\n`
+  
+  tareas.forEach((tarea, index) => {
+    const videoData = tarea.videos as unknown as { titulo: string } | null
+    mensaje += `${index + 1}. ${videoData?.titulo || "Video sin título"}\n`
+  })
+  
+  mensaje += `\n📸 Envía /evidencia para subir una captura.`
+  
+  await sendMessage(chatId, mensaje)
+}
+
+// =============================================
+// Comando /videos - Lista videos activos
+// =============================================
+async function handleVideos(chatId: number) {
+  const supabase = createServerClient()
+  
+  const { data: videos } = await supabase
+    .from("videos")
+    .select("titulo, descripcion, creado_at")
+    .eq("activo", true)
+    .order("creado_at", { ascending: false })
+  
+  if (!videos || videos.length === 0) {
+    await sendMessage(chatId, "📹 No hay videos activos en este momento.")
+    return
+  }
+  
+  let mensaje = `📹 *Videos Activos (${videos.length}):*\n\n`
+  
+  videos.forEach((video, index) => {
+    const fecha = new Date(video.creado_at).toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit' })
+    mensaje += `${index + 1}. *${video.titulo}*\n`
+    mensaje += `   📅 ${fecha}\n\n`
+  })
+  
+  await sendMessage(chatId, mensaje)
+}
+
+// =============================================
+// Comando /stats - Estadísticas personales
+// =============================================
+async function handleStats(telegramId: number, chatId: number) {
+  const supabase = createServerClient()
+  
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("id, nombre_completo, fecha_registro")
+    .eq("telegram_id", telegramId)
+    .single()
+  
+  if (!perfil) {
+    await sendMessage(chatId, "No estás registrado. Envía /start para registrarte.")
+    return
+  }
+  
+  const { data: tareas } = await supabase
+    .from("tareas")
+    .select("estado")
+    .eq("perfil_id", perfil.id)
+  
+  const completadas = tareas?.filter(t => t.estado === "COMPLETADO").length || 0
+  const pendientes = tareas?.filter(t => t.estado === "PENDIENTE").length || 0
+  const total = tareas?.length || 0
+  const porcentaje = total > 0 ? Math.round((completadas / total) * 100) : 0
+  
+  const fechaRegistro = new Date(perfil.fecha_registro).toLocaleDateString('es-PE')
+  
+  let barra = ""
+  const lleno = Math.round(porcentaje / 10)
+  for (let i = 0; i < 10; i++) {
+    barra += i < lleno ? "▓" : "░"
+  }
+  
+  let mensaje = `📊 *Estadísticas de ${perfil.nombre_completo}*\n\n`
+  mensaje += `📅 Registrado: ${fechaRegistro}\n\n`
+  mensaje += `${barra} ${porcentaje}%\n\n`
+  mensaje += `✅ Completadas: ${completadas}\n`
+  mensaje += `⏳ Pendientes: ${pendientes}\n`
+  mensaje += `📋 Total: ${total}`
+  
+  await sendMessage(chatId, mensaje)
+}
+
+// =============================================
+// Comando /perfil - Ver/editar perfil
+// =============================================
+async function handlePerfil(telegramId: number, chatId: number) {
+  const supabase = createServerClient()
+  
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("*")
+    .eq("telegram_id", telegramId)
+    .single()
+  
+  if (!perfil) {
+    await sendMessage(chatId, "No estás registrado. Envía /start para registrarte.")
+    return
+  }
+  
+  const fechaRegistro = new Date(perfil.fecha_registro).toLocaleDateString('es-PE')
+  const rango = perfil.rango === 'administrador' ? '👑 Administrador' : '👤 Usuario'
+  
+  let mensaje = `👤 *Tu Perfil*\n\n`
+  mensaje += `*Nombre:* ${perfil.nombre_completo}\n`
+  mensaje += `*Telegram ID:* ${perfil.telegram_id}\n`
+  mensaje += `*Rango:* ${rango}\n`
+  mensaje += `*Estado:* ${perfil.activo ? '✅ Activo' : '❌ Inactivo'}\n`
+  mensaje += `*Registrado:* ${fechaRegistro}\n\n`
+  mensaje += `Para cambiar tu nombre, usa:\n/editarnombre [nuevo nombre]`
+  
+  await sendMessage(chatId, mensaje)
+}
+
+// =============================================
+// Comando /editarnombre - Cambiar nombre
+// =============================================
+async function handleEditarNombre(telegramId: number, chatId: number, nuevoNombre: string) {
+  const supabase = createServerClient()
+  
+  if (nuevoNombre.length < 3) {
+    await sendMessage(chatId, "El nombre debe tener al menos 3 caracteres.")
+    return
+  }
+  
+  const { error } = await supabase
+    .from("perfiles")
+    .update({ nombre_completo: nuevoNombre.trim() })
+    .eq("telegram_id", telegramId)
+  
+  if (error) {
+    await sendMessage(chatId, "Error al actualizar el nombre. Intenta de nuevo.")
+    return
+  }
+  
+  await sendMessage(chatId, `✅ Nombre actualizado a: *${nuevoNombre.trim()}*`)
+}
+
+// =============================================
+// Comando /ranking - Top de usuarios
+// =============================================
+async function handleRanking(chatId: number) {
+  const supabase = createServerClient()
+  
+  const { data: ranking } = await supabase
+    .from("vista_ranking_usuarios")
+    .select("*")
+    .limit(10)
+  
+  if (!ranking || ranking.length === 0) {
+    await sendMessage(chatId, "No hay datos de ranking disponibles.")
+    return
+  }
+  
+  let mensaje = `🏆 *Top 10 Usuarios*\n\n`
+  
+  const medallas = ['🥇', '🥈', '🥉']
+  
+  ranking.forEach((user, index) => {
+    const medalla = index < 3 ? medallas[index] : `${index + 1}.`
+    mensaje += `${medalla} *${user.nombre_completo}*\n`
+    mensaje += `   ✅ ${user.tareas_completadas} | ${user.porcentaje_completado}%\n`
+  })
+  
+  await sendMessage(chatId, mensaje)
+}
+
+// =============================================
+// Comando /recordatorio - Solicitar recordatorio manual
+// =============================================
+async function handleRecordatorio(telegramId: number, chatId: number) {
+  const supabase = createServerClient()
+  
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("id, nombre_completo")
+    .eq("telegram_id", telegramId)
+    .single()
+  
+  if (!perfil) {
+    await sendMessage(chatId, "No estás registrado. Envía /start para registrarte.")
+    return
+  }
+  
+  const { data: tareas } = await supabase
+    .from("tareas")
+    .select("videos(titulo)")
+    .eq("perfil_id", perfil.id)
+    .eq("estado", "PENDIENTE")
+  
+  if (!tareas || tareas.length === 0) {
+    await sendMessage(chatId, "🎉 ¡No tienes tareas pendientes!")
+    return
+  }
+  
+  let mensaje = `⏰ *Recordatorio Solicitado*\n\n`
+  mensaje += `Hola ${perfil.nombre_completo}, tienes ${tareas.length} video(s) pendiente(s):\n\n`
+  
+  tareas.forEach(tarea => {
+    const videoData = tarea.videos as unknown as { titulo: string } | null
+    mensaje += `• ${videoData?.titulo || "Video sin título"}\n`
+  })
+  
+  mensaje += `\n📸 Envía una captura de pantalla como evidencia.`
+  
+  await sendMessage(chatId, mensaje)
+}
+
+// =============================================
+// Comando /evidencia - Selector de video para evidencia
+// =============================================
+async function handleEvidenciaCommand(telegramId: number, chatId: number) {
+  const supabase = createServerClient()
+  
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("id")
+    .eq("telegram_id", telegramId)
+    .single()
+  
+  if (!perfil) {
+    await sendMessage(chatId, "No estás registrado. Envía /start para registrarte.")
+    return
+  }
+  
+  const { data: tareas } = await supabase
+    .from("tareas")
+    .select("id, videos(titulo)")
+    .eq("perfil_id", perfil.id)
+    .eq("estado", "PENDIENTE")
+    .order("created_at", { ascending: true })
+  
+  if (!tareas || tareas.length === 0) {
+    await sendMessage(chatId, "🎉 ¡No tienes tareas pendientes!")
+    return
+  }
+  
+  if (tareas.length === 1) {
+    // Solo una tarea, seleccionarla automáticamente
+    userSessions.set(telegramId, { step: 'waiting_evidence', selectedTaskId: tareas[0].id })
+    const videoData = tareas[0].videos as unknown as { titulo: string } | null
+    await sendMessage(chatId, `📸 Envía la captura de pantalla para:\n*${videoData?.titulo || "Video"}*`)
+    return
+  }
+  
+  // Múltiples tareas, mostrar selector
+  let mensaje = `📋 *Selecciona el video para tu evidencia:*\n\n`
+  
+  tareas.forEach((tarea, index) => {
+    const videoData = tarea.videos as unknown as { titulo: string } | null
+    mensaje += `${index + 1}. ${videoData?.titulo || "Video sin título"}\n`
+  })
+  
+  mensaje += `\nResponde con el *número* del video:`
+  
+  userSessions.set(telegramId, { step: 'waiting_evidence' })
+  await sendMessage(chatId, mensaje)
+}
+
+// =============================================
+// Manejar selección de video para evidencia
+// =============================================
+async function handleEvidenciaSelection(telegramId: number, chatId: number, selection: string) {
+  const supabase = createServerClient()
+  
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("id")
+    .eq("telegram_id", telegramId)
+    .single()
+  
+  if (!perfil) return false
+  
+  const { data: tareas } = await supabase
+    .from("tareas")
+    .select("id, videos(titulo)")
+    .eq("perfil_id", perfil.id)
+    .eq("estado", "PENDIENTE")
+    .order("created_at", { ascending: true })
+  
+  if (!tareas || tareas.length === 0) return false
+  
+  const index = parseInt(selection) - 1
+  
+  if (isNaN(index) || index < 0 || index >= tareas.length) {
+    await sendMessage(chatId, `❌ Número inválido. Selecciona un número entre 1 y ${tareas.length}`)
+    return true
+  }
+  
+  const tareaSeleccionada = tareas[index]
+  const videoData = tareaSeleccionada.videos as unknown as { titulo: string } | null
+  
+  userSessions.set(telegramId, { step: 'waiting_evidence', selectedTaskId: tareaSeleccionada.id })
+  
+  await sendMessage(chatId, `✅ Seleccionaste: *${videoData?.titulo || "Video"}*\n\n📸 Ahora envía la captura de pantalla:`)
+  
+  return true
+}
+
+// =============================================
+// Manejar foto con tarea seleccionada
+// =============================================
+async function handlePhotoWithSelection(
+  telegramId: number,
+  chatId: number,
+  photo: TelegramUpdate["message"],
+  taskId: string
+) {
+  const supabase = createServerClient()
+  
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("id, nombre_completo")
+    .eq("telegram_id", telegramId)
+    .single()
+  
+  if (!perfil) {
+    await sendMessage(chatId, "Primero debes registrarte. Envía /start para comenzar.")
+    return
+  }
+  
+  const { data: tarea } = await supabase
+    .from("tareas")
+    .select("id, video_id, videos(titulo)")
+    .eq("id", taskId)
+    .eq("perfil_id", perfil.id)
+    .eq("estado", "PENDIENTE")
+    .single()
+  
+  if (!tarea) {
+    await sendMessage(chatId, "Esta tarea ya fue completada o no existe.")
+    userSessions.delete(telegramId)
+    return
+  }
+  
+  const photos = photo?.photo
+  if (!photos || photos.length === 0) {
+    await sendMessage(chatId, "Error al procesar la imagen. Intenta de nuevo.")
+    return
+  }
+  
+  const largestPhoto = photos[photos.length - 1]
+  const fileUrl = await getFileUrl(largestPhoto.file_id)
+  
+  if (!fileUrl) {
+    await sendMessage(chatId, "Error al obtener la imagen. Intenta de nuevo.")
+    return
+  }
+  
+  const imageResponse = await fetch(fileUrl)
+  const imageBuffer = await imageResponse.arrayBuffer()
+  
+  let compressedBuffer: Buffer
+  try {
+    compressedBuffer = await sharp(Buffer.from(imageBuffer))
+      .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 70, mozjpeg: true })
+      .toBuffer()
+  } catch {
+    compressedBuffer = Buffer.from(imageBuffer)
+  }
+  
+  const fileName = `${telegramId}/${tarea.id}_${Date.now()}.jpg`
+  
+  const { error: uploadError } = await supabase.storage
+    .from("evidencias")
+    .upload(fileName, compressedBuffer, {
+      contentType: "image/jpeg",
+      upsert: true,
+    })
+  
+  if (uploadError) {
+    await sendMessage(chatId, "Error al guardar la imagen. Intenta de nuevo.")
+    return
+  }
+  
+  const { data: urlData } = supabase.storage.from("evidencias").getPublicUrl(fileName)
+  
+  await supabase
+    .from("tareas")
+    .update({
+      estado: "COMPLETADO",
+      url_evidencia: urlData.publicUrl,
+      fecha_entrega: new Date().toISOString(),
+    })
+    .eq("id", tarea.id)
+  
+  userSessions.delete(telegramId)
+  
+  const videoData = tarea.videos as unknown as { titulo: string } | null
+  
+  const { count } = await supabase
+    .from("tareas")
+    .select("*", { count: "exact", head: true })
+    .eq("perfil_id", perfil.id)
+    .eq("estado", "PENDIENTE")
+  
+  const pendientesMsg = count && count > 0
+    ? `\n\nTienes ${count} tarea(s) pendiente(s).`
+    : "\n\n🎉 ¡Has completado todas tus tareas!"
+  
+  await sendMessage(chatId, `✅ ¡Evidencia recibida para *${videoData?.titulo || "el video"}*!${pendientesMsg}`)
+}
+
+// =============================================
+// COMANDOS DE ADMINISTRADOR
+// =============================================
+
+// Comando /broadcast - Mensaje masivo
+async function handleBroadcast(telegramId: number, chatId: number, mensaje: string) {
+  if (!await isAdmin(telegramId)) {
+    await sendMessage(chatId, "❌ Este comando es solo para administradores.")
+    return
+  }
+  
+  if (!mensaje || mensaje.trim().length === 0) {
+    userSessions.set(telegramId, { step: 'waiting_broadcast' })
+    await sendMessage(chatId, "📢 *Broadcast*\n\nEscribe el mensaje que quieres enviar a todos los usuarios:")
+    return
+  }
+  
+  const supabase = createServerClient()
+  
+  const { data: perfiles } = await supabase
+    .from("perfiles")
+    .select("telegram_id")
+    .eq("activo", true)
+  
+  if (!perfiles || perfiles.length === 0) {
+    await sendMessage(chatId, "No hay usuarios activos para notificar.")
+    return
+  }
+  
+  let exitosos = 0
+  let fallidos = 0
+  
+  for (const perfil of perfiles) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: perfil.telegram_id,
+          text: `📢 *Mensaje del Administrador*\n\n${mensaje}`,
+          parse_mode: "Markdown",
+        }),
+      })
+      const result = await response.json()
+      if (result.ok) exitosos++
+      else fallidos++
+    } catch {
+      fallidos++
+    }
+  }
+  
+  userSessions.delete(telegramId)
+  await sendMessage(chatId, `✅ Broadcast enviado\n\n• Exitosos: ${exitosos}\n• Fallidos: ${fallidos}`)
+}
+
+// Comando /usuarios - Lista de usuarios
+async function handleUsuarios(telegramId: number, chatId: number) {
+  if (!await isAdmin(telegramId)) {
+    await sendMessage(chatId, "❌ Este comando es solo para administradores.")
+    return
+  }
+  
+  const supabase = createServerClient()
+  
+  const { data: usuarios } = await supabase
+    .from("perfiles")
+    .select("nombre_completo, telegram_id, activo, rango")
+    .order("nombre_completo")
+  
+  if (!usuarios || usuarios.length === 0) {
+    await sendMessage(chatId, "No hay usuarios registrados.")
+    return
+  }
+  
+  const activos = usuarios.filter(u => u.activo).length
+  const inactivos = usuarios.filter(u => !u.activo).length
+  
+  let mensaje = `👥 *Usuarios Registrados (${usuarios.length})*\n`
+  mensaje += `✅ Activos: ${activos} | ❌ Inactivos: ${inactivos}\n\n`
+  
+  usuarios.forEach(user => {
+    const estado = user.activo ? "✅" : "❌"
+    const rango = user.rango === 'administrador' ? " 👑" : ""
+    mensaje += `${estado} ${user.nombre_completo}${rango}\n`
+    mensaje += `   ID: ${user.telegram_id}\n`
+  })
+  
+  await sendMessage(chatId, mensaje)
+}
+
+// Comando /desactivar - Desactivar usuario
+async function handleDesactivar(telegramId: number, chatId: number, targetId: string) {
+  if (!await isAdmin(telegramId)) {
+    await sendMessage(chatId, "❌ Este comando es solo para administradores.")
+    return
+  }
+  
+  if (!targetId) {
+    await sendMessage(chatId, "Uso: /desactivar [telegram_id]\n\nEjemplo: /desactivar 123456789")
+    return
+  }
+  
+  const supabase = createServerClient()
+  
+  const { data: perfil } = await supabase
+    .from("perfiles")
+    .select("nombre_completo, activo")
+    .eq("telegram_id", parseInt(targetId))
+    .single()
+  
+  if (!perfil) {
+    await sendMessage(chatId, `❌ No se encontró usuario con ID: ${targetId}`)
+    return
+  }
+  
+  const nuevoEstado = !perfil.activo
+  
+  await supabase
+    .from("perfiles")
+    .update({ activo: nuevoEstado })
+    .eq("telegram_id", parseInt(targetId))
+  
+  const estadoTexto = nuevoEstado ? "activado ✅" : "desactivado ❌"
+  await sendMessage(chatId, `Usuario *${perfil.nombre_completo}* ha sido ${estadoTexto}`)
+}
+
+// =============================================
+// Verificar permisos para /video y /reporte
+// =============================================
+async function handleVideoCommandWithAuth(telegramId: number, chatId: number) {
+  if (!await isAdmin(telegramId)) {
+    await sendMessage(chatId, "❌ Este comando es solo para administradores.")
+    return
+  }
+  
+  userSessions.set(telegramId, { step: 'waiting_video' })
+  await sendMessage(
+    chatId,
+    `📹 *Subir Nuevo Video*\n\nEnvía el video que quieres compartir con todos los participantes.\n\n⚠️ El video será comprimido automáticamente por Telegram.`
+  )
+}
+
+async function handleReporteWithAuth(telegramId: number, chatId: number) {
+  if (!await isAdmin(telegramId)) {
+    await sendMessage(chatId, "❌ Este comando es solo para administradores.")
+    return
+  }
+  
+  await handleReporte(chatId)
+}
+
 export async function POST(request: NextRequest) {
   try {
     const update: TelegramUpdate = await request.json()
     
-    if (!update.message) {
-      return NextResponse.json({ ok: true })
-    }
-    
-    const { message } = update
-    const telegramId = message.from.id
-    const chatId = message.chat.id
-    const firstName = message.from.first_name
-    
-    // Verificar si está en flujo de subida de video
-    const session = videoUploadSessions.get(telegramId)
-    
-    if (message.text === "/start") {
-      videoUploadSessions.delete(telegramId) // Cancelar flujo si existe
-      await handleStart(telegramId, chatId, firstName)
-    } else if (message.text === "/video") {
-      await handleVideoCommand(telegramId, chatId)
-    } else if (message.text === "/reporte") {
-      await handleReporte(chatId)
-    } else if (message.text === "/mievidencia" || message.text === "/mi_evidencia") {
-      await handleMiEvidencia(telegramId, chatId)
-    } else if (message.text === "/cancelar") {
-      videoUploadSessions.delete(telegramId)
-      await sendMessage(chatId, "❌ Operación cancelada.")
-    } else if (message.video) {
-      // Si recibe video, verificar si está en flujo de /video
-      if (session?.step === 'waiting_video') {
-        await handleVideoReceived(telegramId, chatId, message)
-      } else {
-        await sendMessage(chatId, "Para subir un video, primero envía el comando /video")
-      }
-    } else if (message.photo) {
-      await handlePhoto(telegramId, chatId, message)
-    } else if (message.text) {
-      // Si está esperando título del video
-      if (session?.step === 'waiting_title') {
-        const handled = await handleVideoTitle(telegramId, chatId, message.text)
-        if (!handled) {
-          await handleTextMessage(telegramId, chatId, message.text, firstName)
+    // Responder rápido a Telegram (best practice para Vercel)
+    const responsePromise = (async () => {
+      // Manejar callback queries (botones inline)
+      if (update.callback_query) {
+        const callbackQuery = update.callback_query
+        const telegramId = callbackQuery.from.id
+        const chatId = callbackQuery.message?.chat.id
+        
+        if (chatId && callbackQuery.data) {
+          // Responder al callback para quitar el loading
+          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ callback_query_id: callbackQuery.id }),
+          })
         }
-      } else {
-        await handleTextMessage(telegramId, chatId, message.text, firstName)
+        return
       }
-    }
+      
+      if (!update.message) return
+      
+      const { message } = update
+      const telegramId = message.from.id
+      const chatId = message.chat.id
+      const firstName = message.from.first_name
+      const text = message.text || ""
+      
+      // Verificar sesión activa
+      const session = userSessions.get(telegramId)
+      
+      // ========== COMANDOS ==========
+      if (text === "/start") {
+        userSessions.delete(telegramId)
+        await handleStart(telegramId, chatId, firstName)
+      } 
+      else if (text === "/help" || text === "/ayuda") {
+        await handleHelp(telegramId, chatId)
+      }
+      else if (text === "/cancelar") {
+        userSessions.delete(telegramId)
+        await sendMessage(chatId, "❌ Operación cancelada.")
+      }
+      // Comandos de evidencia
+      else if (text === "/evidencia") {
+        await handleEvidenciaCommand(telegramId, chatId)
+      }
+      else if (text === "/mievidencia" || text === "/mi_evidencia") {
+        await handleMiEvidencia(telegramId, chatId)
+      }
+      else if (text === "/pendientes") {
+        await handlePendientes(telegramId, chatId)
+      }
+      // Comandos de información
+      else if (text === "/videos") {
+        await handleVideos(chatId)
+      }
+      else if (text === "/stats" || text === "/estadisticas") {
+        await handleStats(telegramId, chatId)
+      }
+      else if (text === "/perfil") {
+        await handlePerfil(telegramId, chatId)
+      }
+      else if (text.startsWith("/editarnombre ")) {
+        const nuevoNombre = text.replace("/editarnombre ", "").trim()
+        await handleEditarNombre(telegramId, chatId, nuevoNombre)
+      }
+      else if (text === "/ranking") {
+        await handleRanking(chatId)
+      }
+      else if (text === "/recordatorio") {
+        await handleRecordatorio(telegramId, chatId)
+      }
+      // Comandos de admin
+      else if (text === "/video") {
+        await handleVideoCommandWithAuth(telegramId, chatId)
+      }
+      else if (text === "/reporte") {
+        await handleReporteWithAuth(telegramId, chatId)
+      }
+      else if (text === "/broadcast" || text.startsWith("/broadcast ")) {
+        const msg = text.replace("/broadcast", "").trim()
+        await handleBroadcast(telegramId, chatId, msg)
+      }
+      else if (text === "/usuarios") {
+        await handleUsuarios(telegramId, chatId)
+      }
+      else if (text.startsWith("/desactivar")) {
+        const targetId = text.replace("/desactivar", "").trim()
+        await handleDesactivar(telegramId, chatId, targetId)
+      }
+      // Manejar video recibido (flujo de admin)
+      else if (message.video) {
+        if (session?.step === 'waiting_video') {
+          await handleVideoReceived(telegramId, chatId, message)
+        } else {
+          await sendMessage(chatId, "Para subir un video como admin, primero envía /video")
+        }
+      }
+      // Manejar foto recibida
+      else if (message.photo) {
+        if (session?.step === 'waiting_evidence' && session.selectedTaskId) {
+          await handlePhotoWithSelection(telegramId, chatId, message, session.selectedTaskId)
+        } else {
+          await handlePhoto(telegramId, chatId, message)
+        }
+      }
+      // Manejar texto según contexto de sesión
+      else if (text) {
+        if (session?.step === 'waiting_title') {
+          const handled = await handleVideoTitle(telegramId, chatId, text)
+          if (!handled) {
+            await handleTextMessage(telegramId, chatId, text, firstName)
+          }
+        }
+        else if (session?.step === 'waiting_evidence' && !session.selectedTaskId) {
+          await handleEvidenciaSelection(telegramId, chatId, text)
+        }
+        else if (session?.step === 'waiting_broadcast') {
+          await handleBroadcast(telegramId, chatId, text)
+        }
+        else if (session?.step === 'waiting_new_name') {
+          await handleEditarNombre(telegramId, chatId, text)
+          userSessions.delete(telegramId)
+        }
+        else {
+          await handleTextMessage(telegramId, chatId, text, firstName)
+        }
+      }
+    })()
+    
+    // No esperar a que termine para responder rápido a Vercel
+    responsePromise.catch(err => console.error("Handler error:", err))
     
     return NextResponse.json({ ok: true })
   } catch (error) {

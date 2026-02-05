@@ -1,0 +1,34 @@
+name: Telegram Report Cron
+
+on:
+  schedule:
+    # Ejecutar cada 4 horas
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # Permite ejecutar manualmente desde GitHub
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Report Request
+        run: |
+          echo "Sending report request to Telegram bot..."
+          
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.VERCEL_URL }}/api/cron/recordatorios")
+          
+          echo "Response status: $response"
+          
+          if [ "$response" -eq 200 ]; then
+            echo "✅ Report sent successfully"
+          else
+            echo "❌ Failed to send report (status: $response)"
+            exit 1
+          fi
+
+      - name: Log completion
+        run: |
+          echo "Cron job completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
