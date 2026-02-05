@@ -64,15 +64,28 @@ interface UserSession {
 const userSessions: Map<number, UserSession> = new Map()
 
 async function sendMessage(chatId: number, text: string, parseMode?: string) {
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: parseMode || "Markdown",
-    }),
-  })
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: parseMode || "Markdown",
+      }),
+    })
+    
+    const data = await response.json()
+    
+    if (!data.ok) {
+      console.error("Telegram API error:", data)
+    }
+    
+    return data
+  } catch (error) {
+    console.error("SendMessage error:", error)
+    throw error
+  }
 }
 
 async function getFileUrl(fileId: string): Promise<string | null> {
