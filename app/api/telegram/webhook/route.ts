@@ -1204,143 +1204,151 @@ export async function POST(request: NextRequest) {
   try {
     const update: TelegramUpdate = await request.json()
     
-    // Responder rápido a Telegram (best practice para Vercel)
-    const responsePromise = (async () => {
-      // Manejar callback queries (botones inline)
-      if (update.callback_query) {
-        const callbackQuery = update.callback_query
-        const telegramId = callbackQuery.from.id
-        const chatId = callbackQuery.message?.chat.id
-        
-        if (chatId && callbackQuery.data) {
-          // Responder al callback para quitar el loading
-          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ callback_query_id: callbackQuery.id }),
-          })
-        }
-        return
-      }
-      
-      if (!update.message) return
-      
-      const { message } = update
-      const telegramId = message.from.id
-      const chatId = message.chat.id
-      const firstName = message.from.first_name
-      const text = message.text || ""
-      
-      // Verificar sesión activa
-      const session = userSessions.get(telegramId)
-      
-      // ========== COMANDOS ==========
-      if (text === "/start") {
-        userSessions.delete(telegramId)
-        await handleStart(telegramId, chatId, firstName)
-      } 
-      else if (text === "/help" || text === "/ayuda") {
-        await handleHelp(telegramId, chatId)
-      }
-      else if (text === "/cancelar") {
-        userSessions.delete(telegramId)
-        await sendMessage(chatId, "❌ Operación cancelada.")
-      }
-      // Comandos de evidencia
-      else if (text === "/evidencia") {
-        await handleEvidenciaCommand(telegramId, chatId)
-      }
-      else if (text === "/mievidencia" || text === "/mi_evidencia") {
-        await handleMiEvidencia(telegramId, chatId)
-      }
-      else if (text === "/pendientes") {
-        await handlePendientes(telegramId, chatId)
-      }
-      // Comandos de información
-      else if (text === "/videos") {
-        await handleVideos(chatId)
-      }
-      else if (text === "/stats" || text === "/estadisticas") {
-        await handleStats(telegramId, chatId)
-      }
-      else if (text === "/perfil") {
-        await handlePerfil(telegramId, chatId)
-      }
-      else if (text.startsWith("/editarnombre ")) {
-        const nuevoNombre = text.replace("/editarnombre ", "").trim()
-        await handleEditarNombre(telegramId, chatId, nuevoNombre)
-      }
-      else if (text === "/ranking") {
-        await handleRanking(chatId)
-      }
-      else if (text === "/recordatorio") {
-        await handleRecordatorio(telegramId, chatId)
-      }
-      // Comandos de admin
-      else if (text === "/video") {
-        await handleVideoCommandWithAuth(telegramId, chatId)
-      }
-      else if (text === "/reporte") {
-        await handleReporteWithAuth(telegramId, chatId)
-      }
-      else if (text === "/broadcast" || text.startsWith("/broadcast ")) {
-        const msg = text.replace("/broadcast", "").trim()
-        await handleBroadcast(telegramId, chatId, msg)
-      }
-      else if (text === "/usuarios") {
-        await handleUsuarios(telegramId, chatId)
-      }
-      else if (text.startsWith("/desactivar")) {
-        const targetId = text.replace("/desactivar", "").trim()
-        await handleDesactivar(telegramId, chatId, targetId)
-      }
-      // Manejar video recibido (flujo de admin)
-      else if (message.video) {
-        if (session?.step === 'waiting_video') {
-          await handleVideoReceived(telegramId, chatId, message)
-        } else {
-          await sendMessage(chatId, "Para subir un video como admin, primero envía /video")
-        }
-      }
-      // Manejar foto recibida
-      else if (message.photo) {
-        if (session?.step === 'waiting_evidence' && session.selectedTaskId) {
-          await handlePhotoWithSelection(telegramId, chatId, message, session.selectedTaskId)
-        } else {
-          await handlePhoto(telegramId, chatId, message)
-        }
-      }
-      // Manejar texto según contexto de sesión
-      else if (text) {
-        if (session?.step === 'waiting_title') {
-          const handled = await handleVideoTitle(telegramId, chatId, text)
-          if (!handled) {
-            await handleTextMessage(telegramId, chatId, text, firstName)
-          }
-        }
-        else if (session?.step === 'waiting_evidence' && !session.selectedTaskId) {
-          await handleEvidenciaSelection(telegramId, chatId, text)
-        }
-        else if (session?.step === 'waiting_broadcast') {
-          await handleBroadcast(telegramId, chatId, text)
-        }
-        else if (session?.step === 'waiting_new_name') {
-          await handleEditarNombre(telegramId, chatId, text)
-          userSessions.delete(telegramId)
-        }
-        else {
-          await handleTextMessage(telegramId, chatId, text, firstName)
-        }
-      }
-    })()
+    // Responder inmediatamente a Telegram para evitar reenvíos
+    const response = NextResponse.json({ ok: true })
     
-    // No esperar a que termine para responder rápido a Vercel
-    responsePromise.catch(err => console.error("Handler error:", err))
+    // Procesar el mensaje (no await, pero tampoco lo matamos)
+    // Usar waitUntil si está disponible, o procesar sync
+    processWebhook(update).catch(err => console.error("Webhook processing error:", err))
     
-    return NextResponse.json({ ok: true })
+    return response
   } catch (error) {
     console.error("Webhook error:", error)
     return NextResponse.json({ ok: true })
+  }
+}
+
+// Función separada para procesar el webhook
+async function processWebhook(update: TelegramUpdate) {
+  try {
+    // Manejar callback queries (botones inline)
+    if (update.callback_query) {
+      const callbackQuery = update.callback_query
+      const telegramId = callbackQuery.from.id
+      const chatId = callbackQuery.message?.chat.id
+      
+      if (chatId && callbackQuery.data) {
+        // Responder al callback para quitar el loading (no await, fire and forget)
+        fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ callback_query_id: callbackQuery.id }),
+        }).catch(() => {})
+      }
+      return
+    }
+    
+    if (!update.message) return
+    
+    const { message } = update
+    const telegramId = message.from.id
+    const chatId = message.chat.id
+    const firstName = message.from.first_name
+    const text = message.text || ""
+    
+    // Verificar sesión activa
+    const session = userSessions.get(telegramId)
+    
+    // ========== COMANDOS ==========
+    if (text === "/start") {
+      userSessions.delete(telegramId)
+      await handleStart(telegramId, chatId, firstName)
+    } 
+    else if (text === "/help" || text === "/ayuda") {
+      await handleHelp(telegramId, chatId)
+    }
+    else if (text === "/cancelar") {
+      userSessions.delete(telegramId)
+      await sendMessage(chatId, "❌ Operación cancelada.")
+    }
+    // Comandos de evidencia
+    else if (text === "/evidencia") {
+      await handleEvidenciaCommand(telegramId, chatId)
+    }
+    else if (text === "/mievidencia" || text === "/mi_evidencia") {
+      await handleMiEvidencia(telegramId, chatId)
+    }
+    else if (text === "/pendientes") {
+      await handlePendientes(telegramId, chatId)
+    }
+    // Comandos de información
+    else if (text === "/videos") {
+      await handleVideos(chatId)
+    }
+    else if (text === "/stats" || text === "/estadisticas") {
+      await handleStats(telegramId, chatId)
+    }
+    else if (text === "/perfil") {
+      await handlePerfil(telegramId, chatId)
+    }
+    else if (text.startsWith("/editarnombre ")) {
+      const nuevoNombre = text.replace("/editarnombre ", "").trim()
+      await handleEditarNombre(telegramId, chatId, nuevoNombre)
+    }
+    else if (text === "/ranking") {
+      await handleRanking(chatId)
+    }
+    else if (text === "/recordatorio") {
+      await handleRecordatorio(telegramId, chatId)
+    }
+    // Comandos de admin
+    else if (text === "/video") {
+      await handleVideoCommandWithAuth(telegramId, chatId)
+    }
+    else if (text === "/reporte") {
+      await handleReporteWithAuth(telegramId, chatId)
+    }
+    else if (text === "/broadcast" || text.startsWith("/broadcast ")) {
+      const msg = text.replace("/broadcast", "").trim()
+      await handleBroadcast(telegramId, chatId, msg)
+    }
+    else if (text === "/usuarios") {
+      await handleUsuarios(telegramId, chatId)
+    }
+    else if (text.startsWith("/desactivar")) {
+      const targetId = text.replace("/desactivar", "").trim()
+      await handleDesactivar(telegramId, chatId, targetId)
+    }
+    // Manejar video recibido (flujo de admin)
+    else if (message.video) {
+      if (session?.step === 'waiting_video') {
+        await handleVideoReceived(telegramId, chatId, message)
+      } else {
+        await sendMessage(chatId, "Para subir un video como admin, primero envía /video")
+      }
+    }
+    // Manejar foto recibida
+    else if (message.photo) {
+      if (session?.step === 'waiting_evidence' && session.selectedTaskId) {
+        await handlePhotoWithSelection(telegramId, chatId, message, session.selectedTaskId)
+      } else {
+        await handlePhoto(telegramId, chatId, message)
+      }
+    }
+    // Manejar texto según contexto de sesión
+    else if (text) {
+      if (session?.step === 'waiting_title') {
+        const handled = await handleVideoTitle(telegramId, chatId, text)
+        if (!handled) {
+          await handleTextMessage(telegramId, chatId, text, firstName)
+        }
+      }
+      else if (session?.step === 'waiting_evidence' && !session.selectedTaskId) {
+        await handleEvidenciaSelection(telegramId, chatId, text)
+      }
+      else if (session?.step === 'waiting_broadcast') {
+        await handleBroadcast(telegramId, chatId, text)
+      }
+      else if (session?.step === 'waiting_new_name') {
+        await handleEditarNombre(telegramId, chatId, text)
+        userSessions.delete(telegramId)
+      }
+      else {
+        await handleTextMessage(telegramId, chatId, text, firstName)
+      }
+    }
+  } catch (error) {
+    console.error("Process webhook error:", error)
   }
 }
 
