@@ -1365,6 +1365,26 @@ async function processWebhook(update: TelegramUpdate) {
   }
 }
 
+export async function DELETE() {
+  // Endpoint para limpiar webhook de emergencia
+  try {
+    const deleteUrl = `https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`
+    const response = await fetch(deleteUrl)
+    const data = await response.json()
+    
+    if (data.ok) {
+      return NextResponse.json({ 
+        ok: true, 
+        message: "Webhook eliminado y cola limpiada. Espera 10 segundos y vuelve a configurar el webhook." 
+      })
+    }
+    
+    return NextResponse.json({ ok: false, error: data })
+  } catch (error) {
+    return NextResponse.json({ ok: false, error: String(error) })
+  }
+}
+
 export async function GET() {
   return NextResponse.json({ status: "Bot webhook is running" })
 }
