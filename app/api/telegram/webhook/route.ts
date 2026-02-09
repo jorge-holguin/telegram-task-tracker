@@ -65,6 +65,9 @@ const userSessions: Map<number, UserSession> = new Map()
 
 async function sendMessage(chatId: number, text: string, parseMode?: string) {
   try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 8000) // 8s timeout
+    
     const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -73,18 +76,20 @@ async function sendMessage(chatId: number, text: string, parseMode?: string) {
         text,
         parse_mode: parseMode || "Markdown",
       }),
+      signal: controller.signal,
     })
     
+    clearTimeout(timeout)
     const data = await response.json()
     
     if (!data.ok) {
-      console.error("Telegram API error:", data)
+      console.error("Telegram API error:", JSON.stringify(data))
     }
     
     return data
   } catch (error) {
     console.error("SendMessage error:", error)
-    throw error
+    return { ok: false, error: String(error) }
   }
 }
 
@@ -1217,16 +1222,15 @@ export async function POST(request: NextRequest) {
   try {
     const update: TelegramUpdate = await request.json()
     
-    // Responder inmediatamente a Telegram para evitar reenvíos
-    const response = NextResponse.json({ ok: true })
+    // IMPORTANTE: En Vercel serverless, DEBEMOS esperar a que termine
+    // el procesamiento antes de responder. Si respondemos antes,
+    // Vercel mata la función y Telegram reintenta el mensaje.
+    await processWebhook(update)
     
-    // Procesar el mensaje (no await, pero tampoco lo matamos)
-    // Usar waitUntil si está disponible, o procesar sync
-    processWebhook(update).catch(err => console.error("Webhook processing error:", err))
-    
-    return response
+    return NextResponse.json({ ok: true })
   } catch (error) {
     console.error("Webhook error:", error)
+    // Siempre responder 200 para que Telegram no reintente
     return NextResponse.json({ ok: true })
   }
 }
